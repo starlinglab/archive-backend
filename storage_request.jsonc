@@ -1,0 +1,15 @@
+{
+    "requirements": [
+        "geofence:US",
+        "deletion",
+        "etc."
+    ],
+    "providers": { // empty means all providers with default config, considering reqs.
+        "filecoin": {},
+        "tahoe-lafs": {
+            "grid": "foobar"
+        }
+    },
+    "hash": "<SHA-256 hash of file>",
+    "file_pointer": "<pointer to file>"
+}
