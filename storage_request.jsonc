@@ -11,5 +11,6 @@
         }
     },
     "hash": "<SHA-256 hash of file>",
+    "size": 1234, // File size in bytes
     "file_pointer": "<pointer to file>"
 }

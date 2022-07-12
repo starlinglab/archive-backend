@@ -7,10 +7,10 @@ type StorageRequest struct {
 	FilePointer  string                            `json:"file_pointer"`
 }
 
-type UploadState int
+type UploadStatus int
 
 const (
-	Pending UploadState = iota
+	Pending UploadStatus = iota
 	InProgress
 	Success
 	Failed

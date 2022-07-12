@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/starlinglab/archive-backend/providers"
@@ -26,7 +27,7 @@ type QueueItem struct {
 	FileID         string
 	StorageRequest *types.StorageRequest
 	Provider       string
-	Status         types.UploadState
+	Status         types.UploadStatus
 }
 
 func Init() error {
@@ -39,8 +40,9 @@ func Init() error {
 	// Create column for each provider
 	q := `CREATE TABLE IF NOT EXISTS files
     (
-        file_id         TEXT PRIMARY KEY,
-		storage_request TEXT NOT NULL,
+        file_id         TEXT     PRIMARY KEY,
+		storage_request TEXT     NOT NULL,
+		time            DATETIME NOT NULL,
 	`
 	for i, prov := range providers.Providers {
 		if i+1 == len(providers.Providers) {
@@ -58,18 +60,19 @@ func Init() error {
 	_, err = db.Exec(`
 	CREATE TABLE IF NOT EXISTS queue
 	(
-		rowid           INTEGER PRIMARY KEY
-		file_id         TEXT    NOT NULL,
-		provider        TEXT    NOT NULL,
-		status          INTEGER NOT NULL,
-		taken           BOOLEAN NOT NULL
+		rowid    INTEGER  PRIMARY KEY
+		file_id  TEXT     NOT NULL,
+		provider TEXT     NOT NULL,
+		status   INTEGER  NOT NULL,
+		taken    BOOLEAN  NOT NULL,
+		time     DATETIME NOT NULL      
 	)
 	`)
 	if err != nil {
 		return err
 	}
 
-	// No threads are running yet, set all taken vars to false
+	// No workers are running yet, set all taken vars to false
 	// They might have been set to true before due to an unexpected shutdown
 	_, err = db.Exec(`
 	UPDATE queue
@@ -110,9 +113,9 @@ func NextInQueue() (*QueueItem, error) {
 	row := tx.QueryRow(`
 	SELECT rowid, file_id, provider, status
 	FROM queue
-	WHERE taken = 0
+	WHERE taken = 0 AND status != ?
 	LIMIT 1
-	`)
+	`, types.Success)
 	err = row.Scan(&qi.RowID, &qi.FileID, &qi.Provider, &qi.Status)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -161,20 +164,83 @@ func AddToQueue(fileID string, providers []string, sr *types.StorageRequest) err
 		return err
 	}
 
-	_, err = tx.Exec(`INSERT INTO files (file_id, storage_request) VALUES (?,?)`,
-		fileID, srJSON)
+	_, err = tx.Exec(
+		`INSERT INTO files (file_id, storage_request, time) VALUES (?,?,?)`,
+		fileID, srJSON, time.Now(),
+	)
 	if err != nil {
 		return err
 	}
 
 	for _, provider := range providers {
 		_, err = tx.Exec(`
-		INSERT INTO queue (file_id, provider, status, taken)
-		VALUES (?,?,?,0)
-		`, fileID, provider, types.Pending)
+		INSERT INTO queue (file_id, provider, status, taken, time)
+		VALUES (?,?,?,0,?)
+		`, fileID, provider, types.Pending, time.Now())
 		if err != nil {
 			return err
 		}
+	}
+
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// SetStatus changes the upload status of the specific queue item.
+// It should only be called by the worker in charge of this item.
+func SetStatus(rowid int64, status types.UploadStatus) error {
+	queueMut.Lock()
+	defer queueMut.Unlock()
+	_, err := db.Exec(
+		`UPDATE queue SET status = ?, time = ? WHERE rowid = ?`,
+		status, time.Now(), rowid,
+	)
+	return err
+}
+
+// SetComplete sets a queue item as complete (success) and stores the access
+// information in the database. It also sets it as no longer taken.
+func SetComplete(rowid int64, accessInfo string) error {
+	queueMut.Lock()
+	defer queueMut.Unlock()
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	now := time.Now()
+
+	// Set status of queue item
+	_, err = tx.Exec(
+		`UPDATE queue SET status = ?, time = ?, taken = 0 WHERE rowid = ?`,
+		types.Success, now, rowid,
+	)
+	if err != nil {
+		return err
+	}
+
+	// Get provider and file_id of queue item
+	var (
+		fileID   string
+		provider string
+	)
+	row := tx.QueryRow(`SELECT file_id, provider FROM queue WHERE rowid = ?`, rowid)
+	if err := row.Scan(&fileID, &provider); err != nil {
+		return err
+	}
+
+	// Set access info
+	_, err = tx.Exec(
+		`UPDATE files SET ? = ?, time = ? WHERE file_id = ?`,
+		provider, accessInfo, now, fileID,
+	)
+	if err != nil {
+		return err
 	}
 
 	if err = tx.Commit(); err != nil {
